@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, random_split
 import math
 import numpy as np
 from tqdm import tqdm
@@ -387,6 +387,40 @@ def compute_position_mask(sequences_onehot, threshold=0.2):
     return position_mask, variability
 
 
+def validate_model(model, val_dataloader, categorical_transition, position_mask, num_steps, device):
+    """Validation function"""
+    model.eval()
+    total_val_loss = 0.0
+    num_val_batches = 0
+    
+    with torch.no_grad():
+        for x_0, in val_dataloader:
+            batch_size_actual = x_0.shape[0]
+            
+            t = torch.randint(0, num_steps, (batch_size_actual,), device=device)
+            
+            x_t = categorical_transition.add_noise(x_0, t, device)
+            
+            position_mask_batch = position_mask.unsqueeze(0).expand(batch_size_actual, -1)
+            
+            pred_probs = model(x_t, t, position_mask_batch, num_steps)
+            
+            posterior_true = categorical_transition.posterior(x_t, x_0, t, device)
+            
+            log_pred_probs = torch.log(pred_probs + 1e-8)
+            kl_div = F.kl_div(log_pred_probs, posterior_true, reduction='none').sum(dim=-1)
+            
+            position_weights = 1 - 0.7 * position_mask_batch
+            weighted_kl = kl_div * position_weights
+            
+            val_loss = weighted_kl.mean()
+            total_val_loss += val_loss.item()
+            num_val_batches += 1
+    
+    model.train()
+    return total_val_loss / num_val_batches
+
+
 @torch.no_grad()
 def sample_sequences(model, categorical_transition, n_samples, seq_len, num_classes, 
                     position_mask, num_steps, device, temperature=1.0):
@@ -409,7 +443,7 @@ def sample_sequences(model, categorical_transition, n_samples, seq_len, num_clas
     return x_t
 
 
-def save_model(model, categorical_transition, optimizer, epoch, loss, loss_history, save_dir="./models"):
+def save_model(model, categorical_transition, optimizer, epoch, train_loss, val_loss, train_loss_history, val_loss_history, save_dir="./models"):
     """Save model checkpoint"""
     os.makedirs(save_dir, exist_ok=True)
     
@@ -420,8 +454,10 @@ def save_model(model, categorical_transition, optimizer, epoch, loss, loss_histo
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'epoch': epoch,
-        'loss': loss,
-        'loss_history': loss_history,
+        'train_loss': train_loss,
+        'val_loss': val_loss,
+        'train_loss_history': train_loss_history,
+        'val_loss_history': val_loss_history,
         'model_config': {
             'seq_len': model.seq_len,
             'num_classes': model.num_classes,
@@ -478,7 +514,8 @@ def load_model(checkpoint_path, device='cuda'):
     
     print(f"Model loaded from: {checkpoint_path}")
     print(f"Training was at epoch: {checkpoint['epoch']}")
-    print(f"Last loss: {checkpoint['loss']:.4f}")
+    #print(f"Last train loss: {checkpoint['train_loss']:.4f}")
+    #print(f"Last val loss: {checkpoint['val_loss']:.4f}")
     
     return model, categorical_transition, optimizer, checkpoint['epoch']
 
@@ -501,11 +538,9 @@ def generate_with_saved_model(model_path, position_mask, n_samples=10, temperatu
     
     return samples
 
-    
 
-
-def save_loss_history(loss_history, save_dir="./visual"):
-    """Save loss history to a text file, updating every epoch"""
+def save_loss_history(train_loss_history, val_loss_history, save_dir="./visual"):
+    """Save loss history to a text file with both train and validation losses"""
     os.makedirs(save_dir, exist_ok=True)
     
     # Use a fixed filename that gets updated each epoch
@@ -513,22 +548,24 @@ def save_loss_history(loss_history, save_dir="./visual"):
     
     with open(loss_file_path, 'w') as f:
         f.write("# Training Loss History\n")
-        f.write("# Epoch\tAverage_Loss\n")
-        for epoch, loss in enumerate(loss_history, 1):
-            f.write(f"{epoch}\t{loss:.6f}\n")
+        f.write("# Epoch\tTrain_Loss\tVal_Loss\n")
+        for epoch, (train_loss, val_loss) in enumerate(zip(train_loss_history, val_loss_history), 1):
+            f.write(f"{epoch}\t{train_loss:.6f}\t{val_loss:.6f}\n")
     
     return loss_file_path
 
 
-def save_loss_plot(loss_history, save_dir="./visual"):
-    """Save loss plot to file"""
+def save_loss_plot(train_loss_history, val_loss_history, save_dir="./visual"):
+    """Save loss plot to file with both train and validation curves"""
     os.makedirs(save_dir, exist_ok=True)
     
     plt.figure(figsize=(10, 6))
-    plt.plot(loss_history, linewidth=2, color='blue')
+    plt.plot(train_loss_history, linewidth=2, color='blue', label='Train Loss')
+    plt.plot(val_loss_history, linewidth=2, color='red', label='Validation Loss')
     plt.xlabel('Epoch', fontsize=12)
     plt.ylabel('Loss', fontsize=12)
     plt.title('Categorical Diffusion Training Loss', fontsize=14, fontweight='bold')
+    plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
@@ -561,7 +598,7 @@ def main(resume_from_checkpoint=None):
     num_steps = 500
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     batch_size = 64
-    epochs = 15  
+    epochs = 50  
     lr = 1e-3
     max_seq_len = 146
     
@@ -607,9 +644,16 @@ def main(resume_from_checkpoint=None):
     plt.legend()
     plt.show()
     
-    # Create dataset
+    # Create dataset and split into train/validation
     dataset = TensorDataset(sequences_int)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    
+    print(f"Train samples: {train_size}, Validation samples: {val_size}")
     
     # Initialize or load model
     if resume_from_checkpoint is not None:
@@ -617,18 +661,16 @@ def main(resume_from_checkpoint=None):
         print(f"RESUMING TRAINING FROM CHECKPOINT")
         print(f"{'='*60}")
         
-        # Load existing model
         model, categorical_transition, optimizer, start_epoch = load_model(resume_from_checkpoint, device)
         
-        # Create new scheduler starting from current epoch
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=epochs, 
             last_epoch=start_epoch
         )
         
-        # Load previous loss history if it exists
         checkpoint = torch.load(resume_from_checkpoint, map_location=device)
-        loss_history = checkpoint.get('loss_history', [])
+        train_loss_history = checkpoint.get('train_loss_history', [])
+        val_loss_history = checkpoint.get('val_loss_history', [])
         
         print(f"Resuming from epoch {start_epoch + 1}")
         print(f"Will train for {epochs} more epochs")
@@ -640,10 +682,8 @@ def main(resume_from_checkpoint=None):
         print(f"STARTING FRESH TRAINING")
         print(f"{'='*60}")
         
-        # Initialize categorical transition
         categorical_transition = CategoricalTransition(num_steps, num_classes=21)
         
-        # Initialize model
         model = CategoricalDiffusionTransformer(
             seq_len=max_seq_len,
             num_classes=21,
@@ -656,16 +696,14 @@ def main(resume_from_checkpoint=None):
             num_layers=num_layers
         ).to(device)
         
-        # Optimizer
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
         
-        loss_history = []
+        train_loss_history = []
+        val_loss_history = []
         start_epoch = 0
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    
-    # Training loop
     print("Starting training...")
     
     for epoch in range(start_epoch, start_epoch + epochs):
@@ -673,7 +711,7 @@ def main(resume_from_checkpoint=None):
         num_batches = 0
         
         model.train()
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{start_epoch + epochs}")
+        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{start_epoch + epochs}")
         
         for batch_idx, (x_0,) in enumerate(pbar):
             batch_size_actual = x_0.shape[0]
@@ -712,18 +750,23 @@ def main(resume_from_checkpoint=None):
             num_batches += 1
             pbar.set_postfix(loss=loss.item())
         
-        scheduler.step()
-        avg_loss = epoch_loss / num_batches
-        loss_history.append(avg_loss)
-        loss_file_path = save_loss_history(loss_history, save_dir="./visual")
+        # Validation
+        val_loss = validate_model(model, val_dataloader, categorical_transition, position_mask, num_steps, device)
         
-        print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
+        scheduler.step()
+        avg_train_loss = epoch_loss / num_batches
+        train_loss_history.append(avg_train_loss)
+        val_loss_history.append(val_loss)
+        
+        loss_file_path = save_loss_history(train_loss_history, val_loss_history, save_dir="./visual")
+        
+        print(f"Epoch {epoch+1}, Train Loss: {avg_train_loss:.6f}, Val Loss: {val_loss:.6f}, LR: {scheduler.get_last_lr()[0]:.6f}")
         
         # Save checkpoint every 5 epochs
         if (epoch + 1) % 5 == 0:
             checkpoint_path = save_model(
-                model, categorical_transition, optimizer, epoch, avg_loss,
-                loss_history, save_dir="./checkpoints"
+                model, categorical_transition, optimizer, epoch, avg_train_loss, val_loss,
+                train_loss_history, val_loss_history, save_dir="./checkpoints"
             )
             print(f"Checkpoint saved at epoch {epoch+1}")
         
@@ -751,25 +794,27 @@ def main(resume_from_checkpoint=None):
     # Save final model
     final_model_path = save_model(
         model, categorical_transition, optimizer, start_epoch + epochs - 1, 
-        loss_history[-1], loss_history, save_dir="./final_models"
+        train_loss_history[-1], val_loss_history[-1], train_loss_history, val_loss_history, 
+        save_dir="./final_models"
     )
     
     # Save loss plot
-    loss_plot_path = save_loss_plot(loss_history, save_dir="./visual")
+    loss_plot_path = save_loss_plot(train_loss_history, val_loss_history, save_dir="./visual")
     
     # Save final loss history
-    final_loss_file_path = save_loss_history(loss_history, save_dir="./visual")
+    final_loss_file_path = save_loss_history(train_loss_history, val_loss_history, save_dir="./visual")
     
     print(f"\n{'='*60}")
     print("TRAINING SUMMARY")
     print(f"{'='*60}")
-    print(f"Total epochs trained: {len(loss_history)}")
-    print(f"Final loss: {loss_history[-1]:.4f}")
+    print(f"Total epochs trained: {len(train_loss_history)}")
+    print(f"Final train loss: {train_loss_history[-1]:.6f}")
+    print(f"Final val loss: {val_loss_history[-1]:.6f}")
 
 
 if __name__ == "__main__":
     # Fresh training
-    main()
+    #main()
     
     # To resume training from a checkpoint, uncomment and modify path:
-    #main(resume_from_checkpoint="./checkpoints/categorical_diffusion_model_20250713_144245.pt")
+    main(resume_from_checkpoint="./checkpoints/categorical_diffusion_model_20250721_005827.pt")

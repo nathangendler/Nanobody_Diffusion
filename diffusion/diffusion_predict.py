@@ -72,7 +72,7 @@ if __name__=='__main__':
     reference_fasta = os.path.join(dat_path, f'{file_name}.fasta')
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    batch_size = 5       
+    batch_size = 30       
     n_seeds = 100        
     out_path = 'output/'
     max_seq_len = 146    
@@ -140,14 +140,14 @@ if __name__=='__main__':
         
         # Save intermediate results every 50 seeds (250 sequences)
         if (i + 1) % 10 == 0:
-            intermediate_fasta = out_path + f"sequences/Diffusion_gen_intermediate_0.9_{completed_sequences}.fasta"
+            intermediate_fasta = out_path + f"sequences/Diffusion_gen_intermediate_0.9_3000.fasta"
             write_multiple_fasta(all_seq, intermediate_fasta)
             print(f"Intermediate save: {completed_sequences} sequences saved")
     
     print(f"\n GENERATION COMPLETE")
     
     # Save final sequences to FASTA
-    fasta_output = out_path + "sequences/" + "Diffusion_gen_0.9_500_final.fasta"
+    fasta_output = out_path + "sequences/" + "Diffusion_gen_0.9__final.fasta"
     write_multiple_fasta(all_seq, fasta_output)
     print(f"Final sequences saved to: {fasta_output}")
 
