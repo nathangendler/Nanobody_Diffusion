@@ -1,5 +1,6 @@
 # Data directories
-data/
+!data/
+data/*
 
 # Model checkpoints and outputs
 checkpoints/
