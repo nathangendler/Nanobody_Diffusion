@@ -17,7 +17,7 @@ The easiest way to get started is to follow these steps:
 
 1. **Clone this project**
    ```bash
-   git clone <https://github.com/nathangendler/Nanobody_Diffusion>
+   git clone https://github.com/nathangendler/Nanobody_Diffusion
    cd Nanobody_Diffusion
    ```
 
