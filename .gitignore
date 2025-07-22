@@ -112,6 +112,7 @@ dmypy.json
 # Text files
 *.txt
 *.log
+!requirements.txt
 
 # OS generated files
 .DS_Store
