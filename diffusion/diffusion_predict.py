@@ -8,7 +8,6 @@ import random
 import tqdm
 import time
 from dotenv import load_dotenv
-# Import your model classes and utilities
 from diffusion_train import (
     CategoricalDiffusionTransformer, 
     CategoricalTransition, 
