@@ -1,7 +1,5 @@
 # Nanobody Diffusion: Amino Acid Sequence Generation using Diffusion Models
 
-## A research project for nanobody amino acid sequence generation with diffusion models in Python using Pytorch
-
 This project demonstrates how to use diffusion models for generating nanobody (single-domain antibody) amino acid sequences. It is designed as a research resource, providing a full pipeline from data preparation to model training, prediction, and visualization. Key features in this project include:
 
 - Preparing and processing amino acid sequence data for machine learning
