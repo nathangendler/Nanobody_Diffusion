@@ -109,6 +109,26 @@ def write_multiple_fasta(sequences, output_file):
     # Write all sequences to the FASTA file
     with open(output_file, "w") as fasta_out:
         SeqIO.write(seq_records, fasta_out, "fasta")
+        
+def GetNumeric(seqs, max_seq_len, device='cpu'):
+    """ 
+    Get numeric encoding from AA sequence.
+                    
+    """
+    
+    n_seqs = len(seqs)
+    
+    one_hot_batch = torch.zeros(n_seqs, max_seq_len, device = device, dtype = torch.long) + 20
+  
+    i = 0
+    for seq in seqs:
+        num_seq = torch.as_tensor([one_to_num[a] for a in seq], device=device, dtype=torch.long)        
+       
+        # zero pad sequences
+        one_hot_batch[i,:] = num_seq 
+        i += 1
+    
+    return one_hot_batch
 
 
 if __name__ == "__main__":

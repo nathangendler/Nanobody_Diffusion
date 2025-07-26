@@ -582,6 +582,7 @@ def save_loss_plot(train_loss_history, val_loss_history, save_dir="./visual"):
     
     plt.show()
     return plot_path
+    
 
 
 def main(resume_from_checkpoint=None):
@@ -817,4 +818,5 @@ if __name__ == "__main__":
     #main()
     
     # To resume training from a checkpoint, uncomment and modify path:
-    main(resume_from_checkpoint="./checkpoints/categorical_diffusion_model_20250721_005827.pt")
+    main(resume_from_checkpoint="./checkpoints/categorical_diffusion_model_20250721_031755.pt")
+
