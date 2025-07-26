@@ -13,7 +13,7 @@ This project demonstrates how to use diffusion models for generating nanobody (s
 
 ## Results
 
-![Amino Acid Frequency](/visual/AAfrequency.png)
+![Amino Acid Frequency](/diffusion/AAfrequency.png)
 <br>
 <sub><i>*Amino Acid Frequency of generated sequence (orange) vs test set (blue)*</i></sub>
 
