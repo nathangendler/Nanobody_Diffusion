@@ -5,11 +5,10 @@
 This project demonstrates how to use diffusion models for generating nanobody (single-domain antibody) amino acid sequences. It is designed as a research resource, providing a full pipeline from data preparation to model training, prediction, and visualization. Key features in this project include:
 
 - Preparing and processing amino acid sequence data for machine learning
-- Training a diffusion model for nanobody sequence generation
-- Predicting new nanobody amino acid sequences using trained models
-- Visualize sequence data and model outputs
-- Modular codebase for easy extension and experimentation
-- Example scripts for training, prediction, and visualization
+- Training a diffusion model to generate nanobody sequence generation
+- Create new nanobody amino acid sequences from random data using model
+- Script to visualize sequence data and model outputs
+
 
 ## Results
 
