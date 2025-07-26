@@ -662,6 +662,7 @@ def main(resume_from_checkpoint=None):
         print(f"RESUMING TRAINING FROM CHECKPOINT")
         print(f"{'='*60}")
         
+        
         model, categorical_transition, optimizer, start_epoch = load_model(resume_from_checkpoint, device)
         
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
