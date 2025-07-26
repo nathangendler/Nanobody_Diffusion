@@ -7,7 +7,7 @@ This project demonstrates how to use diffusion models for generating nanobody (s
 - Preparing and processing amino acid sequence data for machine learning
 - Training a diffusion model to generate nanobody sequence generation
 - Create new nanobody amino acid sequences from random data using model
-- Script to visualize sequence data and model outputs
+- Scripts to visualize sequence data and model outputs
 
 
 ## Results
