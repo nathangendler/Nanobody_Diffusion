@@ -19,7 +19,7 @@ from src import num_to_one
 from src import write_multiple_fasta
 
 def Sample(model, categorical_transition, position_mask, seed, seq_len=146, 
-           batch_size=5, num_steps=500, device='cpu', temperature=0.8):
+           batch_size=5, num_steps=500, device='cpu', temperature=1):
     """    
     Sampler: Generate sequences using categorical diffusion
     """
@@ -37,13 +37,12 @@ def Sample(model, categorical_transition, position_mask, seed, seq_len=146,
         t_batch = torch.full((batch_size,), t, device=device)
         
         # Predict denoised probabilities
-        pred_probs = model(x_t, t_batch, position_mask_batch, num_steps)
+        pred_probs = model(x_t, t_batch, num_steps)
         
         x_t = categorical_transition.denoise(x_t, pred_probs, t_batch, temperature)
     
     # Convert to probabilities for final output
-    final_probs = model(x_t, torch.zeros(batch_size, device=device, dtype=torch.long), 
-                       position_mask_batch, num_steps)
+    final_probs = model(x_t, torch.zeros(batch_size, device=device, dtype=torch.long),  num_steps)
     
     return x_t, final_probs
 
@@ -67,15 +66,15 @@ if __name__=='__main__':
     if file_name is None:
         raise ValueError("FILE_NAME environment variable is required")
 
-    model_path = './final_models/categorical_diffusion_model_20250706_215530.pt'
+    model_path = './checkpoints/categorical_diffusion_model_20250731_104046.pt'
     reference_fasta = os.path.join(dat_path, f'{file_name}.fasta')
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    batch_size = 30       
-    n_seeds = 100        
+    batch_size = 100       
+    n_seeds = 140        
     out_path = 'output/'
     max_seq_len = 146    
-    temperature = 0.9
+    temperature = 1
     threshold = 0.2
     num_steps = 500      
     
@@ -139,7 +138,7 @@ if __name__=='__main__':
         
         # Save intermediate results every 50 seeds (250 sequences)
         if (i + 1) % 10 == 0:
-            intermediate_fasta = out_path + f"sequences/Diffusion_gen_intermediate_0.9_3000.fasta"
+            intermediate_fasta = out_path + f"sequences/Diffusion_gen_intermediate_noPositionType_1_2000.fasta"
             write_multiple_fasta(all_seq, intermediate_fasta)
             print(f"Intermediate save: {completed_sequences} sequences saved")
     

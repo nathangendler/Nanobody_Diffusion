@@ -126,24 +126,18 @@ class CategoricalTransition:
 
     
     def denoise(self, x_t, pred_probs, t, temperature=1.0):
-        """
-        Sample x_{t-1} given x_t and predicted probabilities
-        pred_probs: (batch, seq_len, num_classes) - predicted probabilities
-        """
         batch_size, seq_len = x_t.shape
-        x_prev = torch.zeros_like(x_t)
-        
+    
         # Apply temperature
         if temperature != 1.0:
             pred_probs = pred_probs.pow(1.0 / temperature)
             pred_probs = pred_probs / pred_probs.sum(dim=-1, keepdim=True)
         
-        for b in range(batch_size):
-            for i in range(seq_len):
-                probs = pred_probs[b, i]
-                x_prev[b, i] = torch.multinomial(probs, 1)
+        # Vectorized sampling - all at once!
+        flat_probs = pred_probs.view(-1, pred_probs.shape[-1])  # (batch*seq_len, 21)
+        flat_samples = torch.multinomial(flat_probs, 1).squeeze(1)  # (batch*seq_len,)
         
-        return x_prev
+        return flat_samples.view(batch_size, seq_len)
 
 
 class ImprovedTimeEmbedding(nn.Module):
@@ -173,6 +167,33 @@ class ImprovedTimeEmbedding(nn.Module):
         
         # Combine features
         emb = torch.cat([emb, t_features], dim=1)
+        return self.linear(emb)
+    
+class DiffAbStyleTimeEmbedding(nn.Module):
+    """Simplified time embedding similar to DiffAb's approach"""
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        
+        # Simple MLP like DiffAb (no complex processing)
+        self.linear = nn.Sequential(
+            nn.Linear(dim, dim * 2),
+            nn.ReLU(),  # Standard activation instead of SiLU
+            nn.Linear(dim * 2, dim),
+        )
+    
+    def forward(self, t):
+        """
+        Standard sinusoidal embedding only (like DiffAb)
+        Note: Removed max_t parameter - DiffAb doesn't normalize by max timesteps
+        """
+        # Standard sinusoidal embedding (like transformer positional encoding)
+        half = self.dim // 2
+        emb = torch.exp(torch.arange(half, device=t.device) * -math.log(10000) / (half - 1))
+        emb = t[:, None].float() * emb[None, :]
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+        
+        # Simple MLP processing (no additional features)
         return self.linear(emb)
 
 
@@ -240,7 +261,8 @@ class CategoricalDiffusionTransformer(nn.Module):
         self.current_seq_embedding = nn.Embedding(num_classes + 1, embed_dim)  # +1 for padding
         
         # Time embedding
-        self.time_embed = ImprovedTimeEmbedding(time_dim)
+        #self.time_embed = ImprovedTimeEmbedding(time_dim)
+        self.time_embed = DiffAbStyleTimeEmbedding(time_dim)
         
         # Position type embedding
         self.position_type_embed = PositionTypeEmbedding(embed_dim)
@@ -289,7 +311,8 @@ class CategoricalDiffusionTransformer(nn.Module):
         p = p.repeat(batch_size, 1, 1, 1)
         return p
     
-    def forward(self, x_t, t, position_mask, max_t):
+    #def forward(self, x_t, t, position_mask, max_t):
+    def forward(self, x_t, t, position_mask):
         """
         x_t: (batch, seq_len) - noisy integer sequences
         t: (batch,) - timesteps
@@ -301,19 +324,20 @@ class CategoricalDiffusionTransformer(nn.Module):
         
         # Get embeddings
         seq_emb = self.current_seq_embedding(x_t)  # (batch, seq_len, embed_dim)
-        pos_type_emb = self.position_type_embed(position_mask)  # (batch, seq_len, embed_dim)
+        #pos_type_emb = self.position_type_embed(position_mask)  # (batch, seq_len, embed_dim)
         
         # Mix sequence and position type embeddings
-        h = self.input_mixer(torch.cat([seq_emb, pos_type_emb], dim=-1))
+        #h = self.input_mixer(torch.cat([seq_emb, pos_type_emb], dim=-1))
         
         # Get time embedding
-        t_emb = self.time_embed(t, max_t)  # (batch, time_dim)
-        
+        #t_emb = self.time_embed(t, max_t)  # (batch, time_dim)
+        t_emb = self.time_embed(t)
         # Get relative positional embeddings
         rel_p = self.relpos(seq_len, batch_size, device)
         
         # Reshape for transformer: (seq_len, batch, embed_dim)
-        h = h.transpose(0, 1)
+        #h = h.transpose(0, 1)
+        h = seq_emb.transpose(0, 1)
         
         # Apply transformer blocks
         for block in self.blocks:
@@ -352,8 +376,10 @@ class EnhancedTransformerBlock(nn.Module):
         )
         
         # Conditional layer norms
-        self.norm1 = ConditionalLayerNorm(embed_dim, time_dim)
-        self.norm2 = ConditionalLayerNorm(embed_dim, time_dim)
+        #self.norm1 = ConditionalLayerNorm(embed_dim, time_dim)
+        #self.norm2 = ConditionalLayerNorm(embed_dim, time_dim)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
         
         self.dropout = nn.Dropout(dropout)
         
@@ -361,12 +387,14 @@ class EnhancedTransformerBlock(nn.Module):
         # Self-attention with residual
         x_attn = self.attn(x, rel_p)
         x = x + self.dropout(x_attn)
-        x = self.norm1(x, t_emb)
+        #x = self.norm1(x, t_emb)
+        x = self.norm1(x)
         
         # Feedforward with residual
         x_ff = self.ff(x)
         x = x + x_ff
-        x = self.norm2(x, t_emb)
+        #x = self.norm2(x, t_emb)
+        x = self.norm2(x)
         
         return x
 
@@ -403,17 +431,17 @@ def validate_model(model, val_dataloader, categorical_transition, position_mask,
             
             position_mask_batch = position_mask.unsqueeze(0).expand(batch_size_actual, -1)
             
-            pred_probs = model(x_t, t, position_mask_batch, num_steps)
-            
+            #pred_probs = model(x_t, t, position_mask_batch, num_steps)
+            pred_probs = model(x_t, t, position_mask_batch)
             posterior_true = categorical_transition.posterior(x_t, x_0, t, device)
             
             log_pred_probs = torch.log(pred_probs + 1e-8)
             kl_div = F.kl_div(log_pred_probs, posterior_true, reduction='none').sum(dim=-1)
             
-            position_weights = 1 - 0.7 * position_mask_batch
-            weighted_kl = kl_div * position_weights
+            #position_weights = 1 - 0.7 * position_mask_batch
+            #weighted_kl = kl_div * position_weights
             
-            val_loss = weighted_kl.mean()
+            val_loss = kl_div.mean()
             total_val_loss += val_loss.item()
             num_val_batches += 1
     
@@ -436,8 +464,8 @@ def sample_sequences(model, categorical_transition, n_samples, seq_len, num_clas
         t_batch = torch.full((n_samples,), t, device=device)
         
         # Predict denoised probabilities
-        pred_probs = model(x_t, t_batch, position_mask_batch, num_steps)
-        
+        #pred_probs = model(x_t, t_batch, position_mask_batch, num_steps)
+        pred_probs = model(x_t, t_batch, position_mask_batch)
         x_t = categorical_transition.denoise(x_t, pred_probs, t_batch, temperature)
     
     return x_t
@@ -599,7 +627,7 @@ def main(resume_from_checkpoint=None):
     num_steps = 500
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     batch_size = 64
-    epochs = 50  
+    epochs = 30  
     lr = 1e-3
     max_seq_len = 146
     
@@ -728,19 +756,14 @@ def main(resume_from_checkpoint=None):
             position_mask_batch = position_mask.unsqueeze(0).expand(batch_size_actual, -1)
             
             # Forward pass
-            pred_probs = model(x_t, t, position_mask_batch, num_steps)
-            
+            pred_probs = model(x_t, t, position_mask_batch)
             posterior_true = categorical_transition.posterior(x_t, x_0, t, device)
             
             # KL divergence loss
             log_pred_probs = torch.log(pred_probs + 1e-8)
             kl_div = F.kl_div(log_pred_probs, posterior_true, reduction='none').sum(dim=-1)
             
-            # Weight by position mask
-            position_weights = 1 - 0.7 * position_mask_batch
-            weighted_kl = kl_div * position_weights
-            
-            loss = weighted_kl.mean()
+            loss = kl_div.mean()
             
             # Backward
             optimizer.zero_grad()
@@ -773,7 +796,7 @@ def main(resume_from_checkpoint=None):
             print(f"Checkpoint saved at epoch {epoch+1}")
         
         # Generate samples every epoch
-        if True:
+        if (epoch + 1) % 5 == 0:
             model.eval()
             print("\nGenerating samples...")
             
@@ -782,7 +805,7 @@ def main(resume_from_checkpoint=None):
                     model, categorical_transition, n_samples=4, 
                     seq_len=max_seq_len, num_classes=21,
                     position_mask=position_mask, num_steps=num_steps,
-                    device=device, temperature=0.8
+                    device=device, temperature=1
                 )
                 
                 from src.Fasta import num_to_one
@@ -817,7 +840,5 @@ def main(resume_from_checkpoint=None):
 if __name__ == "__main__":
     # Fresh training
     #main()
-    
     # To resume training from a checkpoint, uncomment and modify path:
-    main(resume_from_checkpoint="./checkpoints/categorical_diffusion_model_20250721_031755.pt")
-
+    main(resume_from_checkpoint="./checkpoints/categorical_diffusion_model_20250731_045110.pt")
