@@ -10,9 +10,17 @@ This project demonstrates how to use diffusion models for generating nanobody (s
 
 ## Results
 
-![Amino Acid Frequency](/diffusion/AAfrequency.png)
+![AlphaFold Model](/figs/AlphaFoldModel.png)
 <br>
-<sub><i>*Amino Acid Frequency of generated sequence (orange) vs test set (blue)*</i></sub>
+<sub><i>*AlphaFold predicted structure of generated nanobody sequence*</i></sub>
+
+![Plot AA](/figs/PlotAA.png)
+<br>
+<sub><i>*Amino acid frequency comparison between generated and test sequences*</i></sub>
+
+![All Frequencies](/figs/all_freqs.png)
+<br>
+<sub><i>*Comprehensive frequency analysis across all amino acids*</i></sub>
 
 ## How to install and run the Nanobody Diffusion project
 

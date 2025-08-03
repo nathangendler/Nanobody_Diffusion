@@ -22,30 +22,21 @@ class CategoricalTransition:
         self.num_steps = num_steps
         self.num_classes = num_classes
         
-        # Beta schedule controls how much noise is added
         betas = torch.linspace(0.0001, 0.02, num_steps)
-        
-        # Q_t[i,j] = probability of transitioning from class i to class j
         self.Q_t = []
         self.Q_bar_t = []  #Cumulative
         
         for t in range(num_steps):
             beta_t = betas[t]
-            # Transition matrix at time t
             Q = torch.eye(num_classes) * (1 - beta_t) + torch.ones(num_classes, num_classes) * (beta_t / num_classes)
             self.Q_t.append(Q)
             
-            # Cumulative product Q_bar_t = Q_1 * Q_2 * ... * Q_t
             if t == 0:
                 self.Q_bar_t.append(Q)
             else:
                 self.Q_bar_t.append(self.Q_bar_t[-1] @ Q)
     
     def add_noise(self, x_0, t, device):
-        """
-        Add noise to sequences x_0 at timestep t
-        Vectorized implementation
-        """
         batch_size, seq_len = x_0.shape
         x_t = torch.empty_like(x_0)
 
@@ -54,7 +45,6 @@ class CategoricalTransition:
             seq = x_0[idx]  # (seq_len,)
             probs = Q_bar[seq]  # (seq_len, num_classes)
 
-            # Sample all positions at once for this sequence
             samples = torch.multinomial(probs, num_samples=1).squeeze(1)  
             x_t[idx] = samples
 
@@ -62,41 +52,27 @@ class CategoricalTransition:
 
     
     def posterior(self, x_t, x_0, t, device):
-        """
-        Fully vectorized posterior q(x_{t-1} | x_t, x_0)
-        Inputs:
-            x_t: (batch, seq_len)
-            x_0: (batch, seq_len)
-            t:   (batch,)
-        Output:
-            posterior: (batch, seq_len, num_classes)
-        """
         batch_size, seq_len = x_t.shape
         num_classes = self.num_classes
 
         posterior = torch.zeros(batch_size, seq_len, num_classes, device=device)
 
-        # Create a mask for t == 0 and t > 0
         t_0_mask = t == 0
         t_pos_mask = ~t_0_mask
 
-        # Case 1: t == 0 → deterministic one-hot
         if t_0_mask.any():
             idxs = torch.nonzero(t_0_mask).squeeze(1)
             posterior[idxs] = F.one_hot(x_0[idxs], num_classes=num_classes).float()
 
-        # Case 2: t > 0
         if t_pos_mask.any():
             idxs = torch.nonzero(t_pos_mask).squeeze(1)
 
-            x_0_pos = x_0[idxs]  # (n, seq_len)
+            x_0_pos = x_0[idxs] 
             x_t_pos = x_t[idxs]
             t_pos = t[idxs]
 
-            # Preallocate batch tensor
             posterior_pos = torch.zeros(len(idxs), seq_len, num_classes, device=device)
 
-            # Do per-timestep block with batching inside
             for unique_t in torch.unique(t_pos):
                 sel = (t_pos == unique_t)
                 batch_indices = torch.nonzero(sel).squeeze(1)
@@ -133,72 +109,33 @@ class CategoricalTransition:
             pred_probs = pred_probs.pow(1.0 / temperature)
             pred_probs = pred_probs / pred_probs.sum(dim=-1, keepdim=True)
         
-        # Vectorized sampling - all at once!
-        flat_probs = pred_probs.view(-1, pred_probs.shape[-1])  # (batch*seq_len, 21)
-        flat_samples = torch.multinomial(flat_probs, 1).squeeze(1)  # (batch*seq_len,)
+        flat_probs = pred_probs.view(-1, pred_probs.shape[-1])
+        flat_samples = torch.multinomial(flat_probs, 1).squeeze(1)
         
         return flat_samples.view(batch_size, seq_len)
-
-
-class ImprovedTimeEmbedding(nn.Module):
-    """Enhanced time embedding with multiple features"""
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-        self.linear = nn.Sequential(
-            nn.Linear(dim + 2, dim * 2),  # +2 for sin/cos features
-            nn.SiLU(),
-            nn.Linear(dim * 2, dim),
-        )
     
-    def forward(self, t, max_t):
-        # Sinusoidal embedding
-        half = self.dim // 2
-        emb = torch.exp(torch.arange(half, device=t.device) * -math.log(10000) / (half-1))
-        emb = t[:, None].float() * emb[None, :]
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
-        
-        # Add normalized time features
-        t_norm = t.float() / max_t
-        t_features = torch.stack([
-            torch.sin(2 * math.pi * t_norm),
-            torch.cos(2 * math.pi * t_norm)
-        ], dim=1)
-        
-        # Combine features
-        emb = torch.cat([emb, t_features], dim=1)
-        return self.linear(emb)
-    
-class DiffAbStyleTimeEmbedding(nn.Module):
-    """Simplified time embedding similar to DiffAb's approach"""
+class TimeEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
         
-        # Simple MLP like DiffAb (no complex processing)
         self.linear = nn.Sequential(
             nn.Linear(dim, dim * 2),
-            nn.ReLU(),  # Standard activation instead of SiLU
+            nn.ReLU(), 
             nn.Linear(dim * 2, dim),
         )
     
     def forward(self, t):
-        """
-        Standard sinusoidal embedding only (like DiffAb)
-        Note: Removed max_t parameter - DiffAb doesn't normalize by max timesteps
-        """
-        # Standard sinusoidal embedding (like transformer positional encoding)
+        # Sinusoidal embedding
         half = self.dim // 2
         emb = torch.exp(torch.arange(half, device=t.device) * -math.log(10000) / (half - 1))
         emb = t[:, None].float() * emb[None, :]
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
         
-        # Simple MLP processing (no additional features)
         return self.linear(emb)
 
 
 class ConditionalLayerNorm(nn.Module):
-    """Layer normalization conditioned on time and position type"""
     def __init__(self, embed_dim, cond_dim):
         super().__init__()
         self.norm = nn.LayerNorm(embed_dim)
@@ -206,8 +143,6 @@ class ConditionalLayerNorm(nn.Module):
         self.shift_proj = nn.Linear(cond_dim, embed_dim)
         
     def forward(self, x, cond):
-        # x: (seq_len, batch, embed_dim) or (batch, seq_len, embed_dim)
-        # cond: (batch, cond_dim)
         normed = self.norm(x)
         scale = self.scale_proj(cond)
         shift = self.shift_proj(cond)
@@ -220,35 +155,9 @@ class ConditionalLayerNorm(nn.Module):
             # Handle (batch, seq_len, embed_dim) case
             scale = scale.unsqueeze(1)
             shift = shift.unsqueeze(1)
-            
         return normed * (1 + scale) + shift
 
-
-class PositionTypeEmbedding(nn.Module):
-    """Embedding for position types (framework vs variable)"""
-    def __init__(self, embed_dim):
-        super().__init__()
-        self.framework_emb = nn.Parameter(torch.randn(embed_dim))
-        self.variable_emb = nn.Parameter(torch.randn(embed_dim))
-        
-    def forward(self, position_mask):
-        # position_mask: (batch, seq_len) - 0 for framework, 1 for variable
-        batch_size, seq_len = position_mask.shape
-        embed = torch.zeros(batch_size, seq_len, self.framework_emb.shape[0], device=position_mask.device)
-        
-        # Framework positions
-        framework_mask = (position_mask == 0)
-        embed[framework_mask] = self.framework_emb
-        
-        # Variable positions
-        variable_mask = (position_mask == 1)
-        embed[variable_mask] = self.variable_emb
-        
-        return embed
-
-
 class CategoricalDiffusionTransformer(nn.Module):
-    """Transformer for categorical diffusion on protein sequences"""
     
     def __init__(self, seq_len=146, num_classes=21, time_dim=128, embed_dim=128,
                  d_model=32, nhead=8, dim_feedforward=256, dropout=0.1, num_layers=6):
@@ -256,32 +165,14 @@ class CategoricalDiffusionTransformer(nn.Module):
         self.seq_len = seq_len
         self.num_classes = num_classes
         self.embed_dim = embed_dim
-        
-        # Current sequence embedding (like DiffAb)
-        self.current_seq_embedding = nn.Embedding(num_classes + 1, embed_dim)  # +1 for padding
-        
-        # Time embedding
-        #self.time_embed = ImprovedTimeEmbedding(time_dim)
-        self.time_embed = DiffAbStyleTimeEmbedding(time_dim)
-        
-        # Position type embedding
-        self.position_type_embed = PositionTypeEmbedding(embed_dim)
-        
-        # Relative positional embedding
         self.pe_max_l = 24
+        
+        self.current_seq_embedding = nn.Embedding(num_classes + 1, embed_dim)  # +1 for padding
+        self.time_embed = TimeEmbedding(time_dim)
         self.embed_pos = nn.Embedding(self.pe_max_l*2+1, d_model)
-        
-        # Input mixer
-        self.input_mixer = nn.Sequential(
-            nn.Linear(embed_dim * 2, embed_dim),
-            nn.LayerNorm(embed_dim),
-            nn.ReLU(),
-            nn.Linear(embed_dim, embed_dim),
-        )
-        
-        # Transformer blocks with conditional normalization
+
         self.blocks = nn.ModuleList([
-            EnhancedTransformerBlock(
+            TransformerBlock(
                 embed_dim=embed_dim,
                 time_dim=time_dim,
                 d_model=d_model,
@@ -311,63 +202,38 @@ class CategoricalDiffusionTransformer(nn.Module):
         p = p.repeat(batch_size, 1, 1, 1)
         return p
     
-    #def forward(self, x_t, t, position_mask, max_t):
-    def forward(self, x_t, t, position_mask):
-        """
-        x_t: (batch, seq_len) - noisy integer sequences
-        t: (batch,) - timesteps
-        position_mask: (batch, seq_len) - 0 for framework, 1 for variable
-        max_t: maximum timestep value
-        """
+    def forward(self, x_t, t):
         batch_size, seq_len = x_t.shape
         device = x_t.device
         
         # Get embeddings
-        seq_emb = self.current_seq_embedding(x_t)  # (batch, seq_len, embed_dim)
-        #pos_type_emb = self.position_type_embed(position_mask)  # (batch, seq_len, embed_dim)
-        
-        # Mix sequence and position type embeddings
-        #h = self.input_mixer(torch.cat([seq_emb, pos_type_emb], dim=-1))
-        
-        # Get time embedding
-        #t_emb = self.time_embed(t, max_t)  # (batch, time_dim)
+        seq_emb = self.current_seq_embedding(x_t)
         t_emb = self.time_embed(t)
-        # Get relative positional embeddings
         rel_p = self.relpos(seq_len, batch_size, device)
         
-        # Reshape for transformer: (seq_len, batch, embed_dim)
-        #h = h.transpose(0, 1)
         h = seq_emb.transpose(0, 1)
         
-        # Apply transformer blocks
         for block in self.blocks:
             h = block(h, t_emb, rel_p)
         
-        # Reshape back: (batch, seq_len, embed_dim)
         h = h.transpose(0, 1)
         
-        # Expand time embedding to all positions
         t_emb_expanded = t_emb.unsqueeze(1).expand(-1, seq_len, -1)
         
-        # Output projection
         h_with_time = torch.cat([h, t_emb_expanded], dim=-1)
-        logits = self.output_proj(h_with_time)  # (batch, seq_len, num_classes)
+        logits = self.output_proj(h_with_time)
         
-        # Apply softmax to get probabilities
         probs = F.softmax(logits, dim=-1)
         
         return probs
 
 
-class EnhancedTransformerBlock(nn.Module):
-    """Transformer block with conditional normalization"""
+class TransformerBlock(nn.Module):
     def __init__(self, embed_dim, time_dim, d_model, nhead, dim_feedforward, dropout):
         super().__init__()
         
-        # Attention layer
         self.attn = Layer(in_dim=embed_dim, d_model=d_model, nhead=nhead)
         
-        # Feedforward
         self.ff = nn.Sequential(
             nn.Linear(embed_dim, dim_feedforward),
             nn.ReLU(),
@@ -375,9 +241,7 @@ class EnhancedTransformerBlock(nn.Module):
             nn.Linear(dim_feedforward, embed_dim)
         )
         
-        # Conditional layer norms
-        #self.norm1 = ConditionalLayerNorm(embed_dim, time_dim)
-        #self.norm2 = ConditionalLayerNorm(embed_dim, time_dim)
+        # Layer norms
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
         
@@ -387,36 +251,17 @@ class EnhancedTransformerBlock(nn.Module):
         # Self-attention with residual
         x_attn = self.attn(x, rel_p)
         x = x + self.dropout(x_attn)
-        #x = self.norm1(x, t_emb)
         x = self.norm1(x)
         
         # Feedforward with residual
         x_ff = self.ff(x)
         x = x + x_ff
-        #x = self.norm2(x, t_emb)
         x = self.norm2(x)
         
         return x
 
 
-def compute_position_mask(sequences_onehot, threshold=0.2):
-    """
-    Compute position mask: 0 for framework (conserved), 1 for variable
-    """
-    # Compute entropy at each position
-    avg_dist = sequences_onehot.mean(dim=0)  # (seq_len, num_classes)
-    entropy = -(avg_dist * torch.log(avg_dist + 1e-8)).sum(dim=-1)
-    max_entropy = torch.log(torch.tensor(21.0))
-    variability = entropy / max_entropy
-    
-    # Create mask: 1 for variable positions, 0 for framework
-    position_mask = (variability > threshold).float()
-    
-    return position_mask, variability
-
-
-def validate_model(model, val_dataloader, categorical_transition, position_mask, num_steps, device):
-    """Validation function"""
+def validate_model(model, val_dataloader, categorical_transition, num_steps, device):
     model.eval()
     total_val_loss = 0.0
     num_val_batches = 0
@@ -429,17 +274,11 @@ def validate_model(model, val_dataloader, categorical_transition, position_mask,
             
             x_t = categorical_transition.add_noise(x_0, t, device)
             
-            position_mask_batch = position_mask.unsqueeze(0).expand(batch_size_actual, -1)
-            
-            #pred_probs = model(x_t, t, position_mask_batch, num_steps)
-            pred_probs = model(x_t, t, position_mask_batch)
+            pred_probs = model(x_t, t)
             posterior_true = categorical_transition.posterior(x_t, x_0, t, device)
             
             log_pred_probs = torch.log(pred_probs + 1e-8)
             kl_div = F.kl_div(log_pred_probs, posterior_true, reduction='none').sum(dim=-1)
-            
-            #position_weights = 1 - 0.7 * position_mask_batch
-            #weighted_kl = kl_div * position_weights
             
             val_loss = kl_div.mean()
             total_val_loss += val_loss.item()
@@ -451,28 +290,21 @@ def validate_model(model, val_dataloader, categorical_transition, position_mask,
 
 @torch.no_grad()
 def sample_sequences(model, categorical_transition, n_samples, seq_len, num_classes, 
-                    position_mask, num_steps, device, temperature=1.0):
-    """Generate sequences using categorical diffusion"""
+                    num_steps, device, temperature=1.0):
     
-    # Start with random sequences
     x_t = torch.randint(0, num_classes, (n_samples, seq_len), device=device)
-    
-    # Expand position mask for batch
-    position_mask_batch = position_mask.unsqueeze(0).expand(n_samples, -1)
     
     for t in tqdm(reversed(range(num_steps)), desc="Sampling"):
         t_batch = torch.full((n_samples,), t, device=device)
         
         # Predict denoised probabilities
-        #pred_probs = model(x_t, t_batch, position_mask_batch, num_steps)
-        pred_probs = model(x_t, t_batch, position_mask_batch)
+        pred_probs = model(x_t, t_batch)
         x_t = categorical_transition.denoise(x_t, pred_probs, t_batch, temperature)
     
     return x_t
 
 
 def save_model(model, categorical_transition, optimizer, epoch, train_loss, val_loss, train_loss_history, val_loss_history, save_dir="./models"):
-    """Save model checkpoint"""
     os.makedirs(save_dir, exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -509,10 +341,8 @@ def save_model(model, categorical_transition, optimizer, epoch, train_loss, val_
 
 
 def load_model(checkpoint_path, device='cuda'):
-    """Load model from checkpoint"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # Recreate model with saved config
     config = checkpoint['model_config']
     model = CategoricalDiffusionTransformer(
         seq_len=config['seq_len'],
@@ -533,34 +363,27 @@ def load_model(checkpoint_path, device='cuda'):
         num_classes=diff_config['num_classes']
     )
     
-    # Load model weights
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Recreate optimizer if needed
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     
     print(f"Model loaded from: {checkpoint_path}")
     print(f"Training was at epoch: {checkpoint['epoch']}")
-    #print(f"Last train loss: {checkpoint['train_loss']:.4f}")
-    #print(f"Last val loss: {checkpoint['val_loss']:.4f}")
     
     return model, categorical_transition, optimizer, checkpoint['epoch']
 
-def generate_with_saved_model(model_path, position_mask, n_samples=10, temperature=0.8):
-    """Generate sequences using a saved model"""
+def generate_with_saved_model(model_path, n_samples=10, temperature=0.8):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # Load the model
     model, categorical_transition, _, _ = load_model(model_path, device)
     model.eval()
     
-    # Generate samples
     with torch.no_grad():
         samples = sample_sequences(
             model, categorical_transition, n_samples=n_samples,
             seq_len=model.seq_len, num_classes=21,
-            position_mask=position_mask, num_steps=categorical_transition.num_steps,
+            num_steps=categorical_transition.num_steps,
             device=device, temperature=temperature
         )
     
@@ -568,10 +391,8 @@ def generate_with_saved_model(model_path, position_mask, n_samples=10, temperatu
 
 
 def save_loss_history(train_loss_history, val_loss_history, save_dir="./visual"):
-    """Save loss history to a text file with both train and validation losses"""
     os.makedirs(save_dir, exist_ok=True)
     
-    # Use a fixed filename that gets updated each epoch
     loss_file_path = os.path.join(save_dir, "training_loss_history.txt")
     
     with open(loss_file_path, 'w') as f:
@@ -582,35 +403,6 @@ def save_loss_history(train_loss_history, val_loss_history, save_dir="./visual")
     
     return loss_file_path
 
-
-def save_loss_plot(train_loss_history, val_loss_history, save_dir="./visual"):
-    """Save loss plot to file with both train and validation curves"""
-    os.makedirs(save_dir, exist_ok=True)
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_loss_history, linewidth=2, color='blue', label='Train Loss')
-    plt.plot(val_loss_history, linewidth=2, color='red', label='Validation Loss')
-    plt.xlabel('Epoch', fontsize=12)
-    plt.ylabel('Loss', fontsize=12)
-    plt.title('Categorical Diffusion Training Loss', fontsize=14, fontweight='bold')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    # Save plot
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    plot_path = os.path.join(save_dir, f"loss_plot_{timestamp}.png")
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    print(f"Loss plot saved to: {plot_path}")
-    
-    # Also save as PDF for publication quality
-    pdf_path = os.path.join(save_dir, f"loss_plot_{timestamp}.pdf")
-    plt.savefig(pdf_path, bbox_inches='tight')
-    print(f"Loss plot (PDF) saved to: {pdf_path}")
-    
-    plt.show()
-    return plot_path
-    
 
 
 def main(resume_from_checkpoint=None):
@@ -646,9 +438,6 @@ def main(resume_from_checkpoint=None):
     seq_list, _ = GetFasta(dat_path + '\\' + file_name + '.fasta')
     print(f"Loaded {len(seq_list)} protein sequences")
     
-    # Convert to one-hot for analysis
-    OHot = GetOneHot(seq_list, max_seq_len, device=device)
-    
     # Convert sequences to integers
     from src.Fasta import one_to_num
     sequences_int = []
@@ -657,23 +446,7 @@ def main(resume_from_checkpoint=None):
         sequences_int.append(seq_int)
     sequences_int = torch.tensor(sequences_int, device=device)
     
-    # Compute position mask
-    position_mask, variability = compute_position_mask(OHot, threshold=0.2)
-    print(f"Framework positions: {(position_mask == 0).sum().item()}")
-    print(f"Variable positions: {(position_mask == 1).sum().item()}")
-    
-    # Visualize position types and save
-    os.makedirs("./visual", exist_ok=True)
-    plt.figure(figsize=(12, 4))
-    plt.plot(variability.cpu().numpy())
-    plt.axhline(y=0.2, color='r', linestyle='--', label='Threshold')
-    plt.xlabel('Position')
-    plt.ylabel('Variability')
-    plt.title('Position Variability in Protein Sequences')
-    plt.legend()
-    plt.show()
-    
-    # Create dataset and split into train/validation
+
     dataset = TensorDataset(sequences_int)
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
@@ -684,7 +457,6 @@ def main(resume_from_checkpoint=None):
     
     print(f"Train samples: {train_size}, Validation samples: {val_size}")
     
-    # Initialize or load model
     if resume_from_checkpoint is not None:
         print(f"\n{'='*60}")
         print(f"RESUMING TRAINING FROM CHECKPOINT")
@@ -749,14 +521,10 @@ def main(resume_from_checkpoint=None):
             # Sample random timesteps
             t = torch.randint(0, num_steps, (batch_size_actual,), device=device)
             
-            # Add noise
             x_t = categorical_transition.add_noise(x_0, t, device)
             
-            # Expand position mask for batch
-            position_mask_batch = position_mask.unsqueeze(0).expand(batch_size_actual, -1)
-            
             # Forward pass
-            pred_probs = model(x_t, t, position_mask_batch)
+            pred_probs = model(x_t, t)
             posterior_true = categorical_transition.posterior(x_t, x_0, t, device)
             
             # KL divergence loss
@@ -775,8 +543,7 @@ def main(resume_from_checkpoint=None):
             num_batches += 1
             pbar.set_postfix(loss=loss.item())
         
-        # Validation
-        val_loss = validate_model(model, val_dataloader, categorical_transition, position_mask, num_steps, device)
+        val_loss = validate_model(model, val_dataloader, categorical_transition, num_steps, device)
         
         scheduler.step()
         avg_train_loss = epoch_loss / num_batches
@@ -803,8 +570,7 @@ def main(resume_from_checkpoint=None):
             with torch.no_grad():
                 samples = sample_sequences(
                     model, categorical_transition, n_samples=4, 
-                    seq_len=max_seq_len, num_classes=21,
-                    position_mask=position_mask, num_steps=num_steps,
+                    seq_len=max_seq_len, num_classes=21, num_steps=num_steps,
                     device=device, temperature=1
                 )
                 
@@ -816,15 +582,11 @@ def main(resume_from_checkpoint=None):
             model.train()
             print()
     
-    # Save final model
     final_model_path = save_model(
         model, categorical_transition, optimizer, start_epoch + epochs - 1, 
         train_loss_history[-1], val_loss_history[-1], train_loss_history, val_loss_history, 
         save_dir="./final_models"
     )
-    
-    # Save loss plot
-    loss_plot_path = save_loss_plot(train_loss_history, val_loss_history, save_dir="./visual")
     
     # Save final loss history
     final_loss_file_path = save_loss_history(train_loss_history, val_loss_history, save_dir="./visual")
@@ -839,6 +601,6 @@ def main(resume_from_checkpoint=None):
 
 if __name__ == "__main__":
     # Fresh training
-    #main()
+    main()
     # To resume training from a checkpoint, uncomment and modify path:
-    main(resume_from_checkpoint="./checkpoints/categorical_diffusion_model_20250731_045110.pt")
+    #main(resume_from_checkpoint="./checkpoints/categorical_diffusion_model_20250731_045110.pt")
